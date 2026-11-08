@@ -8,7 +8,7 @@ object SumBench extends Suite {
 
   bench(
     "sum of 1M ints",
-    Bench.Options(runs = 10, warmup = 3),
+    Bench.Options(),
     Input.perTrial(Array.range(0, 1_000_000)),
   ) { numbers =>
     numbers.sum

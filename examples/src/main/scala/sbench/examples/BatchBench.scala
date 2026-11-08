@@ -11,7 +11,7 @@ import sbench.Suite
   */
 object BatchBench extends Suite {
 
-  bench("xorshift mix", Bench.Options(runs = 10, warmup = 3, batch = 1_000_000)) {
+  bench("xorshift mix", Bench.Options()) {
     for {
       seed <- Input.perTrial(123456789)
     } yield {
@@ -23,7 +23,7 @@ object BatchBench extends Suite {
     }
   }
 
-  bench("append to buffer", Bench.Options(runs = 10, warmup = 3, batch = 100_000)) {
+  bench("append to buffer", Bench.Options(batch = Bench.Batch.Fixed(100_000))) {
     Input.perBatch(ListBuffer.empty[Int]).map(buf => buf += 1)
   }
 }

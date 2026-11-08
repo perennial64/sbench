@@ -1,48 +1,131 @@
 package sbench
 
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.duration.FiniteDuration
+
 object Bench {
 
   /** Configuration of a bench run. */
   final case class Options(
-      runs: Int = Defaults.runs,
-      warmup: Int = Defaults.warmup,
-      batch: Int = Defaults.batch,
+      warmup: FiniteDuration = Defaults.warmup,
+      samples: Int = Defaults.samples,
+      batch: Batch = Defaults.batch,
   )
 
-  /** Result of a bench, with all timings per single invocation. */
-  final case class Result(runs: Int, batch: Int, meanNs: Double, minNs: Double, maxNs: Double)
+  /** How many invocations are timed as one sample. */
+  sealed trait Batch
+
+  object Batch {
+
+    /** Size each sample to take about `sampleTime`, measured after warmup. */
+    final case class Timed(sampleTime: FiniteDuration = Defaults.sampleTime) extends Batch {
+      require(sampleTime.toNanos > 0, "sampleTime must be positive")
+    }
+
+    /** Time exactly `size` invocations per sample. */
+    final case class Fixed(size: Int) extends Batch {
+      require(size > 0, "batch size must be positive")
+    }
+  }
+
+  /** Result of a bench: one per-invocation timing for each sample taken. */
+  final case class Result(batch: Int, samplesNs: Vector[Double]) {
+    require(samplesNs.nonEmpty, "a result needs at least one sample")
+
+    private lazy val sorted: Vector[Double] = samplesNs.sorted
+
+    def samples: Int = samplesNs.length
+    def meanNs: Double = samplesNs.sum / samples
+    def minNs: Double = sorted.head
+    def maxNs: Double = sorted.last
+    def medianNs: Double = percentileNs(50)
+
+    /** The `p`th percentile by nearest rank. */
+    def percentileNs(p: Double): Double = {
+      val rank = math.ceil(p / 100.0 * samples).toInt - 1
+      sorted(math.min(samples - 1, math.max(0, rank)))
+    }
+
+    /** Sample standard deviation, zero when there is nothing to vary. */
+    def stdDevNs: Double =
+      if (samples < 2) 0.0
+      else {
+        val mean = meanNs
+        math.sqrt(samplesNs.map(s => (s - mean) * (s - mean)).sum / (samples - 1))
+      }
+
+    /** Standard deviation as a share of the mean, the handiest noise measure.
+      */
+    def relStdDevPct: Double = if (meanNs == 0.0) 0.0 else stdDevNs / meanNs * 100.0
+
+    /** Half width of a 95% confidence interval of the mean, by normal
+      * approximation.
+      */
+    def errorNs: Double = 1.96 * stdDevNs / math.sqrt(samples.toDouble)
+
+    def lowNs: Double = meanNs - errorNs
+    def highNs: Double = meanNs + errorNs
+
+    /** Samples beyond Tukey's fences. */
+    def outliers: Int = {
+      val q1 = percentileNs(25)
+      val q3 = percentileNs(75)
+      val fence = 1.5 * (q3 - q1)
+      samplesNs.count(s => s < q1 - fence || s > q3 + fence)
+    }
+
+    def opsPerSecond: Double = if (meanNs == 0.0) 0.0 else 1e9 / meanNs
+  }
 
   /** Bench an input chain, whose `yield` body is the benchmark. */
   def bench[L <: Input.Lvl, A](chain: Input[L, A], opts: Options): Result = {
-    require(opts.runs > 0, "runs must be positive")
-    require(opts.warmup >= 0, "warmup must be non-negative")
-    require(opts.batch > 0, "batch must be positive")
+    require(opts.samples > 0, "samples must be positive")
+    require(opts.warmup.toNanos >= 0, "warmup must be non-negative")
 
     val trial = Input.advance(chain.node, Input.trialStage)
     try {
-      // One untimed invocation up front to run verificators
+      // One untimed verification invocation up front
       Input.verifyOnce(trial.node)
 
-      var w = 0
-      while (w < opts.warmup) {
-        timeBatch(trial.node, opts.batch)
-        w += 1
+      // Calibrate twice
+      val cold = sizeBatch(trial.node, opts.batch)
+      warmUp(trial.node, cold, opts.warmup.toNanos)
+      val batch = sizeBatch(trial.node, opts.batch)
+
+      val samples = Vector.newBuilder[Double]
+      var s = 0
+      while (s < opts.samples) {
+        samples += timeBatch(trial.node, batch).toDouble / batch
+        s += 1
       }
 
-      var sum = 0.0
-      var min = Double.PositiveInfinity
-      var max = Double.NegativeInfinity
-      var r = 0
-      while (r < opts.runs) {
-        val perOp = timeBatch(trial.node, opts.batch).toDouble / opts.batch
-        sum += perOp
-        if (perOp < min) min = perOp
-        if (perOp > max) max = perOp
-        r += 1
-      }
-
-      Result(opts.runs, opts.batch, sum / opts.runs, min, max)
+      Result(batch, samples.result())
     } finally Input.releaseAll(trial.releases)
+  }
+
+  /** Run batches until `warmupNs` has elapsed. */
+  private def warmUp(trial: Input.Node, batch: Int, warmupNs: Long): Unit = {
+    val deadline = System.nanoTime() + warmupNs
+    while (System.nanoTime() < deadline) {
+      timeBatch(trial, batch)
+      ()
+    }
+  }
+
+  /** Pick a batch size whose sample lasts about [[Batch.Timed.sampleTime]]. */
+  private def sizeBatch(trial: Input.Node, batching: Batch): Int = batching match {
+    case Batch.Fixed(size) => size
+
+    case Batch.Timed(sampleTime) =>
+      var batch = 1
+      var elapsed = timeBatch(trial, batch)
+      while (elapsed < Defaults.calibrationNs && batch <= Defaults.maxBatch / 8) {
+        batch *= 8
+        elapsed = timeBatch(trial, batch)
+      }
+      val perOpNs = math.max(elapsed.toDouble / batch, 1e-3)
+      val scaled = math.ceil(sampleTime.toNanos / perOpNs)
+      math.max(1.0, math.min(scaled, Defaults.maxBatch.toDouble)).toInt
   }
 
   private def timeBatch(trial: Input.Node, batch: Int): Long = {
@@ -66,8 +149,8 @@ object Bench {
 
       // Per-invocation inputs are built by `invocation()` itself, so they are
       // measured along with the body.
-      case node =>
-        val invocation = Input.compile(node)
+      case other =>
+        val invocation = Input.compile(other)
         val t0 = System.nanoTime()
         var i = 0
         while (i < batch) {
@@ -79,13 +162,23 @@ object Bench {
 
   object Defaults {
 
-    /** Default amount of benchmark run repetitions. */
-    val runs: Int = 5
+    /** Time spent warming up before any sample is kept, per platform. */
+    val warmup: FiniteDuration = Platform.warmup
 
-    /** Default amount of warmup calls for this platform. */
-    val warmup: Int = 3
+    /** Target duration of a single sample, when [[Batch.Timed]] sizes it. */
+    val sampleTime: FiniteDuration = 100.millis
 
-    /** Default amount of invocations timed as one batch. */
-    val batch: Int = 1
+    /** How many samples to keep. */
+    val samples: Int = 10
+
+    /** Let the harness size batches by default. */
+    val batch: Batch = Batch.Timed()
+
+    /** A calibration sample has to last this long to be worth extrapolating
+      * from.
+      */
+    private[sbench] val calibrationNs: Long = 1000000L
+
+    private[sbench] val maxBatch: Int = 1 << 28
   }
 }

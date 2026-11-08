@@ -3,9 +3,7 @@ package sbench
 object Report {
 
   /** Whether to colorize, honouring the `NO_COLOR` convention. */
-  val colorByDefault: Boolean =
-    try !sys.env.contains("NO_COLOR")
-    catch { case _: Throwable => false }
+  val colorByDefault: Boolean = Platform.env("NO_COLOR").isEmpty
 
   /** One result, laid out as [[table]] lays it out. */
   def line(name: String, result: Bench.Result, color: Boolean = colorByDefault): String =
@@ -29,30 +27,38 @@ object Report {
     if (color) str.render else str.plainText
 
   private def entry(name: String, result: Bench.Result, width: Int): fansi.Str = {
-    val spread = result.maxNs / result.minNs
-    val detail =
-      s"${count(result.batch)} per sample, ${count(result.runs)} samples, max ${sig(spread)}x min"
+    val noisy = result.relStdDevPct >= 10.0 || result.outliers * 10 > result.samples
+    val stats = fansi.Str(
+      "median " + duration(result.medianNs) +
+        "  sd " + duration(result.stdDevNs) + " (" + sig(result.relStdDevPct) + "%)" +
+        "  " + count(result.samples) + " samples of " + count(result.batch) +
+        (if (result.outliers > 0) "  " + count(result.outliers) + outlierWord(result.outliers)
+         else "")
+    )
 
     fansi.Str.join(
       Seq(
         fansi.Bold.On(fansi.Str(pad(name, width))),
         fansi.Str("  "),
-        fansi.Color.DarkGray("time:   ["),
-        fansi.Color.DarkGray(duration(result.minNs)),
+        fansi.Color.DarkGray("time:"),
+        fansi.Str("   ["),
+        fansi.Str(duration(result.lowNs)),
         fansi.Str(" "),
         fansi.Bold.On(fansi.Str(duration(result.meanNs))),
         fansi.Str(" "),
-        fansi.Color.DarkGray(duration(result.maxNs)),
-        fansi.Color.DarkGray("]"),
+        fansi.Str(duration(result.highNs)),
+        fansi.Str("]"),
         fansi.Str("\n"),
         fansi.Str(pad("", width)),
         fansi.Str("  "),
-        // A wide spread means the benchmark never settled
-        if (spread >= 2.0) fansi.Color.Yellow("spread: " + detail)
-        else fansi.Color.DarkGray("spread: " + detail),
+        if (noisy) fansi.Color.Yellow(fansi.Str("stats:  ") ++ stats)
+        else fansi.Color.DarkGray("stats:") ++ fansi.Str("  ") ++ stats,
       )
     )
   }
+
+  private def outlierWord(outliers: Int): String =
+    if (outliers == 1) " outlier" else " outliers"
 
   private def pad(text: String, width: Int): String =
     if (text.length >= width) text else text + " " * (width - text.length)
