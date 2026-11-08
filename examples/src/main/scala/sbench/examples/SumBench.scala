@@ -4,13 +4,12 @@ import sbench.Bench
 import sbench.Input
 import sbench.Suite
 
-/** Simple bench of summing an array of numbers. */
 object SumBench extends Suite {
 
   bench(
     "sum of 1M ints",
-    Input.perTrial(Array.range(0, 1_000_000)),
     Bench.Options(runs = 10, warmup = 3),
+    Input.perTrial(Array.range(0, 1_000_000)),
   ) { numbers =>
     numbers.sum
   }

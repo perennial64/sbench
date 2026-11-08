@@ -11,23 +11,19 @@ import sbench.Suite
   */
 object BatchBench extends Suite {
 
-  bench(
-    "xorshift mix",
-    Input.perTrial(123456789),
-    Bench.Options(runs = 10, warmup = 3, batch = 1_000_000),
-  ) { seed =>
-    var x = seed
-    x ^= x << 13
-    x ^= x >>> 17
-    x ^= x << 5
-    x
+  bench("xorshift mix", Bench.Options(runs = 10, warmup = 3, batch = 1_000_000)) {
+    for {
+      seed <- Input.perTrial(123456789)
+    } yield {
+      var x = seed
+      x ^= x << 13
+      x ^= x >>> 17
+      x ^= x << 5
+      x
+    }
   }
 
-  bench(
-    "append to buffer",
-    Input.perBatch(ListBuffer.empty[Int]),
-    Bench.Options(runs = 10, warmup = 3, batch = 100_000),
-  ) { buf =>
-    buf += 1
+  bench("append to buffer", Bench.Options(runs = 10, warmup = 3, batch = 100_000)) {
+    Input.perBatch(ListBuffer.empty[Int]).map(buf => buf += 1)
   }
 }

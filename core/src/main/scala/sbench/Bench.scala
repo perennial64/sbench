@@ -1,7 +1,4 @@
 package sbench
-import sbench.Input.PerTrial
-import sbench.Input.PerBatch
-import sbench.Input.PerInvocation
 
 object Bench {
 
@@ -15,17 +12,17 @@ object Bench {
   /** Result of a bench, with all timings per single invocation. */
   final case class Result(runs: Int, batch: Int, meanNs: Double, minNs: Double, maxNs: Double)
 
-  /** Bench given function with specified options. */
-  def bench[S](input: Input[S], opts: Options)(body: S => Any): Result = {
+  /** Bench an input chain, whose `yield` body is the benchmark. */
+  def bench[L <: Input.Lvl, A](chain: Input[L, A], opts: Options): Result = {
     require(opts.runs > 0, "runs must be positive")
     require(opts.warmup >= 0, "warmup must be non-negative")
     require(opts.batch > 0, "batch must be positive")
 
-    val batch = runBatch(input, opts.batch, body)
+    val trial = Input.advance(chain.node, Input.trialStage)
 
     var w = 0
     while (w < opts.warmup) {
-      batch()
+      timeBatch(trial, opts.batch)
       w += 1
     }
 
@@ -34,7 +31,7 @@ object Bench {
     var max = Double.NegativeInfinity
     var r = 0
     while (r < opts.runs) {
-      val perOp = batch().toDouble / opts.batch
+      val perOp = timeBatch(trial, opts.batch).toDouble / opts.batch
       sum += perOp
       if (perOp < min) min = perOp
       if (perOp > max) max = perOp
@@ -44,48 +41,31 @@ object Bench {
     Result(opts.runs, opts.batch, sum / opts.runs, min, max)
   }
 
-  private def runBatch[S](input: Input[S], batch: Int, body: S => Any): () => Long = input match {
-    case _: PerTrial[_] =>
-      val s = input.get
-      () => {
+  private def timeBatch(trial: Input.Node, batch: Int): Long =
+    Input.advance(trial, Input.batchStage) match {
+      // No per-invocation inputs: the body is the only thing left, so call it
+      // straight.
+      case Input.Mapped(Input.Pure(state), body) =>
         val t0 = System.nanoTime()
         var i = 0
         while (i < batch) {
-          Blackhole.consume(body(s))
+          Blackhole.consume(body(state))
           i += 1
         }
         System.nanoTime() - t0
-      }
 
-    case _: PerBatch[_] =>
-      () => {
-        val s = input.get
+      // Per-invocation inputs are built by `invocation()` itself, so they are
+      // measured along with the body.
+      case node =>
+        val invocation = Input.compile(node)
         val t0 = System.nanoTime()
         var i = 0
-        while (i < batch) { Blackhole.consume(body(s)); i += 1 }
-        System.nanoTime() - t0
-      }
-
-    case _: PerInvocation[_] =>
-      val states = new Array[Any](batch)
-      () => {
-        var i = 0
         while (i < batch) {
-          states(i) = input.get
+          Blackhole.consume(invocation())
           i += 1
         }
-
-        val t0 = System.nanoTime()
-        i = 0
-
-        while (i < batch) {
-          Blackhole.consume(body(states(i).asInstanceOf[S]))
-          i += 1
-        }
-
         System.nanoTime() - t0
-      }
-  }
+    }
 
   object Defaults {
 
