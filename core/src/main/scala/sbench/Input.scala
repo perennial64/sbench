@@ -52,26 +52,37 @@ object Input {
     implicit val invocationThenInvocation: Leq[Invocation, Invocation] = unsafe
   }
 
-  /** State built once per benchmark. Correct when the body does not mutate it.
+  /** State built once per benchmark, with an optional `release` run after the
+    * last run. Correct when the body does not mutate it.
     */
-  def perTrial[A](state: => A): Input[Trial, A] = new Input(Leaf(trialStage, () => state))
+  def perTrial[A](state: => A, release: A => Unit = noRelease): Input[Trial, A] =
+    new Input(leaf(trialStage, () => state, release))
 
-  /** State rebuilt before every timed batch, outside of the timed region. Use
-    * for bodies that mutate their state, so that each batch starts over from
-    * the same point.
+  /** State rebuilt before every timed batch, outside of the timed region, with
+    * an optional `release` run after each batch. Use for bodies that mutate
+    * their state, so that each batch starts over from the same point.
     */
-  def perBatch[A](state: => A): Input[Batch, A] = new Input(Leaf(batchStage, () => state))
+  def perBatch[A](state: => A, release: A => Unit = noRelease): Input[Batch, A] =
+    new Input(leaf(batchStage, () => state, release))
 
   /** State rebuilt before every invocation, which is measured along with the
-    * body.
+    * body, as is its optional `release`. Unlike the coarser levels, a throwing
+    * body skips the release.
     *
     * Reach for this level only when building the state is cheap next to the
     * body, or when the body cannot be benched any other way.
     */
-  def perInvocation[A](state: => A): Input[Invocation, A] = new Input(Leaf(invocationStage, () => state))
+  def perInvocation[A](state: => A, release: A => Unit = noRelease): Input[Invocation, A] =
+    new Input(leaf(invocationStage, () => state, release))
 
   /** No state. */
   val empty: Input[Trial, Unit] = perTrial(())
+
+  /** Release nothing. */
+  val noRelease: Any => Unit = _ => ()
+
+  private def leaf[A](stage: Int, make: () => A, release: A => Unit): Node =
+    Leaf(stage, make.asInstanceOf[() => Any], value => release(value.asInstanceOf[A]))
 
   private[sbench] val trialStage = 0
   private[sbench] val batchStage = 1
@@ -79,28 +90,65 @@ object Input {
 
   private[sbench] sealed trait Node
   private[sbench] final case class Pure(value: Any) extends Node
-  private[sbench] final case class Leaf(stage: Int, make: () => Any) extends Node
+  private[sbench] final case class Leaf(stage: Int, make: () => Any, release: Any => Unit) extends Node
   private[sbench] final case class Bind(src: Node, f: Any => Node) extends Node
   private[sbench] final case class Mapped(src: Node, f: Any => Any) extends Node
 
+  /** A chain advanced to some stage, along with the releases owed for the state
+    * built on the way, finest first.
+    */
+  private[sbench] final case class Advanced(node: Node, releases: List[() => Unit])
+
   /** Evaluate every input of `stage` or coarser, leaving finer ones suspended.
     */
-  private[sbench] def advance(node: Node, stage: Int): Node = node match {
-    case Pure(_) => node
-    case Leaf(leafStage, make) => if (leafStage <= stage) Pure(make()) else node
-    case Bind(src, f) =>
-      advance(src, stage) match {
-        case Pure(value) => advance(f(value), stage)
-        case suspended => Bind(suspended, f)
+  private[sbench] def advance(node: Node, stage: Int): Advanced = node match {
+    case Pure(_) => Advanced(node, Nil)
+    case Leaf(leafStage, make, release) =>
+      if (leafStage > stage) Advanced(node, Nil)
+      else {
+        val value = make()
+        Advanced(Pure(value), List(() => release(value)))
       }
-    case Mapped(src, f) => Mapped(advance(src, stage), f)
+    case Bind(src, f) =>
+      val advanced = advance(src, stage)
+      advanced.node match {
+        case Pure(value) =>
+          val rest = advance(f(value), stage)
+          Advanced(rest.node, rest.releases ::: advanced.releases)
+        case suspended => Advanced(Bind(suspended, f), advanced.releases)
+      }
+    case Mapped(src, f) =>
+      val advanced = advance(src, stage)
+      Advanced(Mapped(advanced.node, f), advanced.releases)
   }
+
+  /** Release state in the order [[advance]] reported it. */
+  private[sbench] def releaseAll(releases: List[() => Unit]): Unit = releases.foreach(_())
 
   /** Flatten whatever is left of a chain into a single function. */
   private[sbench] def compile(node: Node): () => Any = node match {
     case Pure(value) => () => value
-    case Leaf(_, make) => make
     case Mapped(Pure(value), f) => () => f(value)
+    case Leaf(_, make, release) =>
+      () => {
+        val value = make()
+        release(value)
+        value
+      }
+    case Mapped(Leaf(_, make, release), f) =>
+      () => {
+        val value = make()
+        val out = f(value)
+        release(value)
+        out
+      }
+    case Bind(Leaf(_, make, release), f) =>
+      () => {
+        val value = make()
+        val out = runOnce(f(value))
+        release(value)
+        out
+      }
     case Mapped(src, f) =>
       val run = compile(src)
       () => f(run())
@@ -114,7 +162,20 @@ object Input {
     */
   private[sbench] def runOnce(node: Node): Any = node match {
     case Pure(value) => value
-    case Leaf(_, make) => make()
+    case Leaf(_, make, release) =>
+      val value = make()
+      release(value)
+      value
+    case Mapped(Leaf(_, make, release), f) =>
+      val value = make()
+      val out = f(value)
+      release(value)
+      out
+    case Bind(Leaf(_, make, release), f) =>
+      val value = make()
+      val out = runOnce(f(value))
+      release(value)
+      out
     case Mapped(src, f) => f(runOnce(src))
     case Bind(src, f) => runOnce(f(runOnce(src)))
   }
