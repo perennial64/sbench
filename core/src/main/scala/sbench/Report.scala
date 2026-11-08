@@ -27,13 +27,25 @@ object Report {
     if (color) str.render else str.plainText
 
   private def entry(name: String, result: Bench.Result, width: Int): fansi.Str = {
-    val noisy = result.relStdDevPct >= 10.0 || result.outliers * 10 > result.samples
+    val outliers = result.outliers
+    val noisy =
+      result.relStdDevPct >= 10.0 ||
+        outliers.total * 10 > result.sampleCount ||
+        result.rSquared.exists(_ < 0.99)
+
     val stats = fansi.Str(
       "median " + duration(result.medianNs) +
         "  sd " + duration(result.stdDevNs) + " (" + sig(result.relStdDevPct) + "%)" +
-        "  " + count(result.samples) + " samples of " + count(result.batch) +
-        (if (result.outliers > 0) "  " + count(result.outliers) + outlierWord(result.outliers)
-         else "")
+        outlierText(outliers)
+    )
+
+    val iterations = result.samples.map(_.iterations)
+    val plan = fansi.Str(
+      count(result.sampleCount) + " samples, " +
+        (if (iterations.min == iterations.max) count(iterations.min) + " iterations each"
+         else count(iterations.min) + ".." + count(iterations.max) + " iterations") +
+        result.rSquared.fold("")(r => "  R2 " + sig(r)) +
+        result.overheadNs.fold("")(o => "  overhead " + duration(o) + "/sample")
     )
 
     val rows = Seq.newBuilder[fansi.Str]
@@ -41,19 +53,21 @@ object Report {
     rows += triple(
       "time:  ",
       duration(result.lowNs),
-      duration(result.meanNs),
+      duration(result.estimateNs),
       duration(result.highNs),
     )
 
+    // The slowest time is the lowest throughput, so the bounds swap over.
     for {
       low <- result.throughputAt(result.highNs)
-      mean <- result.throughputAt(result.meanNs)
+      mean <- result.throughputAt(result.estimateNs)
       high <- result.throughputAt(result.lowNs)
     } rows += triple("thrpt: ", rate(low, result.work), rate(mean, result.work), rate(high, result.work))
 
     rows +=
       (if (noisy) fansi.Color.Yellow(fansi.Str("stats:  ") ++ stats)
        else fansi.Color.DarkGray("stats:") ++ fansi.Str("  ") ++ stats)
+    rows += fansi.Color.DarkGray("plan:") ++ fansi.Str("   ") ++ plan
 
     val lines = rows.result()
     val head = fansi.Bold.On(fansi.Str(pad(name, width))) ++ fansi.Str("  ") ++ lines.head
@@ -61,6 +75,16 @@ object Report {
       acc ++ fansi.Str("\n") ++ fansi.Str(pad("", width)) ++ fansi.Str("  ") ++ row
     }
   }
+
+  private def outlierText(outliers: Bench.Outliers): String =
+    if (outliers.total == 0) ""
+    else {
+      val parts = Seq(
+        if (outliers.mild > 0) Some(count(outliers.mild) + " mild") else None,
+        if (outliers.severe > 0) Some(count(outliers.severe) + " severe") else None,
+      ).flatten
+      "  " + parts.mkString(", ") + " outlier" + (if (outliers.total == 1) "" else "s")
+    }
 
   private def triple(label: String, low: String, mean: String, high: String): fansi.Str =
     fansi.Str.join(
@@ -94,9 +118,6 @@ object Report {
     else if (value < 1e9) sig(value / 1e6) + "M"
     else sig(value / 1e9) + "G"
 
-  private def outlierWord(outliers: Int): String =
-    if (outliers == 1) " outlier" else " outliers"
-
   private def pad(text: String, width: Int): String =
     if (text.length >= width) text else text + " " * (width - text.length)
 
@@ -124,7 +145,7 @@ object Report {
     }
   }
 
-  private[sbench] def count(value: Int): String = {
+  private[sbench] def count(value: Long): String = {
     val digits = value.toString
     val head = digits.length % 3
     val groups = (if (head == 0) Nil else List(digits.take(head))) ++
