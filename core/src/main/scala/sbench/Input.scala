@@ -1,34 +1,29 @@
 package sbench
 
-import scala.annotation.nowarn
+/** Typed state passed to a benchmark body. */
+sealed abstract class Input[S](state: => S) {
 
-/** Input state passed to a benchmark body. */
-sealed abstract class Input[S] {
-  private[sbench] def get: S
+  /** State for a benchmark invocation. */
+  private[sbench] def get: S = state
 }
 
 object Input {
 
-  /** State built once per benchmark. Correct when the body does not mutate it.
-    */
+  /** State built once per benchmark. */
   def perTrial[S](state: S): Input[S] = new PerTrial(state)
 
-  /** State rebuilt before every invocation, for bodies that mutate it. */
+  /** State rebuilt before every timed batch. */
+  def perBatch[S](state: => S): Input[S] = new PerBatch(state)
+
+  /** State rebuilt before every invocation. */
   def perInvocation[S](state: => S): Input[S] = new PerInvocation(state)
 
   /** No state, for bodies that need none. */
   val empty: Input[Unit] = perTrial(())
 
-  final class PerTrial[S] private[sbench] (state: S) extends Input[S] {
+  private[sbench] final class PerTrial[S](state: => S) extends Input[S](state)
 
-    @nowarn("msg=consider using")
-    @volatile private var cell: S = state
+  private[sbench] final class PerBatch[S](state: => S) extends Input[S](state)
 
-    private[sbench] def get: S = cell
-  }
-
-  final class PerInvocation[S] private[sbench] (state: => S) extends Input[S] {
-
-    private[sbench] def get: S = state
-  }
+  private[sbench] final class PerInvocation[S](state: => S) extends Input[S](state)
 }

@@ -4,7 +4,7 @@ import sbench.Bench
 import sbench.Input
 import sbench.Suite
 
-/** Benches summing an array of numbers. */
+/** Simple bench of summing an array of numbers. */
 object SumBench extends Suite {
 
   bench(
@@ -15,5 +15,3 @@ object SumBench extends Suite {
     numbers.sum
   }
 }
-
-@main def runSumBench(): Unit = SumBench.run()

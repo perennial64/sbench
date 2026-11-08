@@ -32,8 +32,9 @@ trait Suite {
     for (entry <- benches) {
       val result = entry.run()
       println(
-        s"${entry.name}, runs=${result.runs}, mean=${math.round(result.meanNs)}ns, " +
-          s"min=${result.minNs}ns, max=${result.maxNs}ns"
+        s"${entry.name}, runs=${result.runs}, batch=${result.batch}, " +
+          s"mean=${math.round(result.meanNs)}ns, min=${math.round(result.minNs)}ns, " +
+          s"max=${math.round(result.maxNs)}ns"
       )
     }
 }
