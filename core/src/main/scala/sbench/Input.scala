@@ -20,6 +20,12 @@ final class Input[L <: Input.Lvl, A] private[sbench] (private[sbench] val node: 
   /** The benchmark body. */
   def map[B](f: A => B): Input[L, B] =
     new Input(Input.Mapped(node, a => f(a.asInstanceOf[A])))
+
+  /** Check this value once, outside of any measurement, failing the benchmark
+    * with `label` when `check` does not hold.
+    */
+  def verify(label: String)(check: A => Boolean): Input[L, A] =
+    new Input(Input.Verified(node, a => check(a.asInstanceOf[A]), label))
 }
 
 object Input {
@@ -84,6 +90,9 @@ object Input {
   private def leaf[A](stage: Int, make: () => A, release: A => Unit): Node =
     Leaf(stage, make.asInstanceOf[() => Any], value => release(value.asInstanceOf[A]))
 
+  /** Thrown when a [[Input.verify]] check does not hold. */
+  final class VerificationFailed(val label: String) extends RuntimeException("benchmark verification failed: " + label)
+
   private[sbench] val trialStage = 0
   private[sbench] val batchStage = 1
   private[sbench] val invocationStage = 2
@@ -93,6 +102,7 @@ object Input {
   private[sbench] final case class Leaf(stage: Int, make: () => Any, release: Any => Unit) extends Node
   private[sbench] final case class Bind(src: Node, f: Any => Node) extends Node
   private[sbench] final case class Mapped(src: Node, f: Any => Any) extends Node
+  private[sbench] final case class Verified(src: Node, check: Any => Boolean, label: String) extends Node
 
   /** A chain advanced to some stage, along with the releases owed for the state
     * built on the way, finest first.
@@ -120,6 +130,47 @@ object Input {
     case Mapped(src, f) =>
       val advanced = advance(src, stage)
       Advanced(Mapped(advanced.node, f), advanced.releases)
+    case Verified(src, check, label) =>
+      val advanced = advance(src, stage)
+      advanced.node match {
+        case Pure(value) =>
+          if (!check(value)) throw new VerificationFailed(label)
+          advanced
+        case suspended => Advanced(Verified(suspended, check, label), advanced.releases)
+      }
+  }
+
+  /** Run a chain once, untimed, applying the checks that are left. */
+  private[sbench] def verifyOnce(node: Node): Unit = {
+    var releases: List[() => Unit] = Nil
+
+    def eval(current: Node): Any = current match {
+      case Pure(value) => value
+      case Leaf(_, make, release) =>
+        val value = make()
+        releases = (() => release(value)) :: releases
+        value
+      case Bind(src, f) => eval(f(eval(src)))
+      case Mapped(src, f) => f(eval(src))
+      case Verified(src, check, label) =>
+        val value = eval(src)
+        if (!check(value)) throw new VerificationFailed(label)
+        value
+    }
+
+    try {
+      val _ = eval(node)
+    } finally releaseAll(releases)
+  }
+
+  /** Drop the checks that [[verifyOnce]] has already applied, so that a checked
+    * benchmark runs exactly the code an unchecked one does.
+    */
+  private[sbench] def strip(node: Node): Node = node match {
+    case Verified(src, _, _) => strip(src)
+    case Mapped(src, f) => Mapped(strip(src), f)
+    case Bind(src, f) => Bind(strip(src), f)
+    case other => other
   }
 
   /** Release state in the order [[advance]] reported it. */
@@ -128,6 +179,7 @@ object Input {
   /** Flatten whatever is left of a chain into a single function. */
   private[sbench] def compile(node: Node): () => Any = node match {
     case Pure(value) => () => value
+    case Verified(src, _, _) => compile(src)
     case Mapped(Pure(value), f) => () => f(value)
     case Leaf(_, make, release) =>
       () => {
@@ -162,6 +214,7 @@ object Input {
     */
   private[sbench] def runOnce(node: Node): Any = node match {
     case Pure(value) => value
+    case Verified(src, _, _) => runOnce(src)
     case Leaf(_, make, release) =>
       val value = make()
       release(value)

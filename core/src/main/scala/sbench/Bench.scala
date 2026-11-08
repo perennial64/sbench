@@ -20,6 +20,9 @@ object Bench {
 
     val trial = Input.advance(chain.node, Input.trialStage)
     try {
+      // One untimed invocation up front to run verificators
+      Input.verifyOnce(trial.node)
+
       var w = 0
       while (w < opts.warmup) {
         timeBatch(trial.node, opts.batch)
@@ -44,7 +47,7 @@ object Bench {
 
   private def timeBatch(trial: Input.Node, batch: Int): Long = {
     val perBatch = Input.advance(trial, Input.batchStage)
-    try timeInvocations(perBatch.node, batch)
+    try timeInvocations(Input.strip(perBatch.node), batch)
     finally Input.releaseAll(perBatch.releases)
   }
 
