@@ -31,6 +31,7 @@ lazy val sbench = projectMatrix
   .settings(
     name := "sbench",
     description := "sbench",
+    libraryDependencies += "com.lihaoyi" %%% "fansi" % "0.5.1",
   )
   .jvmPlatform(scalaVersions = allScalaVersions)
   .jsPlatform(

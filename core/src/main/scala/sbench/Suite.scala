@@ -19,14 +19,7 @@ trait Suite {
   final def bench[L <: Input.Lvl, A](name: String, opts: Bench.Options = Bench.Options())(chain: Input[L, A]): Unit =
     benches += new Entry(name, chain, opts)
 
-  /** Run all configure benchmarks and print result to stdout. */
-  final def run(): Unit =
-    for (entry <- benches) {
-      val result = entry.run()
-      println(
-        s"${entry.name}, runs=${result.runs}, batch=${result.batch}, " +
-          s"mean=${math.round(result.meanNs)}ns, min=${math.round(result.minNs)}ns, " +
-          s"max=${math.round(result.maxNs)}ns"
-      )
-    }
+  /** Run all configured benchmarks and collect their results. */
+  final def run(): Vector[(String, Bench.Result)] =
+    benches.map(e => (e.name, e.run())).toVector
 }
