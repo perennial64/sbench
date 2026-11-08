@@ -36,26 +36,63 @@ object Report {
          else "")
     )
 
+    val rows = Seq.newBuilder[fansi.Str]
+
+    rows += triple(
+      "time:  ",
+      duration(result.lowNs),
+      duration(result.meanNs),
+      duration(result.highNs),
+    )
+
+    for {
+      low <- result.throughputAt(result.highNs)
+      mean <- result.throughputAt(result.meanNs)
+      high <- result.throughputAt(result.lowNs)
+    } rows += triple("thrpt: ", rate(low, result.work), rate(mean, result.work), rate(high, result.work))
+
+    rows +=
+      (if (noisy) fansi.Color.Yellow(fansi.Str("stats:  ") ++ stats)
+       else fansi.Color.DarkGray("stats:") ++ fansi.Str("  ") ++ stats)
+
+    val lines = rows.result()
+    val head = fansi.Bold.On(fansi.Str(pad(name, width))) ++ fansi.Str("  ") ++ lines.head
+    lines.tail.foldLeft(head) { (acc, row) =>
+      acc ++ fansi.Str("\n") ++ fansi.Str(pad("", width)) ++ fansi.Str("  ") ++ row
+    }
+  }
+
+  private def triple(label: String, low: String, mean: String, high: String): fansi.Str =
     fansi.Str.join(
       Seq(
-        fansi.Bold.On(fansi.Str(pad(name, width))),
-        fansi.Str("  "),
-        fansi.Color.DarkGray("time:"),
-        fansi.Str("   ["),
-        fansi.Str(duration(result.lowNs)),
+        fansi.Color.DarkGray(label.trim),
+        fansi.Str(" " * (label.length - label.trim.length + 1)),
+        fansi.Str("["),
+        fansi.Str(low),
         fansi.Str(" "),
-        fansi.Bold.On(fansi.Str(duration(result.meanNs))),
+        fansi.Bold.On(fansi.Str(mean)),
         fansi.Str(" "),
-        fansi.Str(duration(result.highNs)),
+        fansi.Str(high),
         fansi.Str("]"),
-        fansi.Str("\n"),
-        fansi.Str(pad("", width)),
-        fansi.Str("  "),
-        if (noisy) fansi.Color.Yellow(fansi.Str("stats:  ") ++ stats)
-        else fansi.Color.DarkGray("stats:") ++ fansi.Str("  ") ++ stats,
       )
     )
+
+  private[sbench] def rate(unitsPerSecond: Double, work: Bench.Work): String = work match {
+    case Bench.Work.Bytes(_) => binary(unitsPerSecond) + "/s"
+    case _ => si(unitsPerSecond) + " ops/s"
   }
+
+  private def binary(value: Double): String =
+    if (value < 1024.0) sig(value) + " B"
+    else if (value < 1024.0 * 1024) sig(value / 1024.0) + " KiB"
+    else if (value < 1024.0 * 1024 * 1024) sig(value / (1024.0 * 1024)) + " MiB"
+    else sig(value / (1024.0 * 1024 * 1024)) + " GiB"
+
+  private def si(value: Double): String =
+    if (value < 1e3) sig(value)
+    else if (value < 1e6) sig(value / 1e3) + "K"
+    else if (value < 1e9) sig(value / 1e6) + "M"
+    else sig(value / 1e9) + "G"
 
   private def outlierWord(outliers: Int): String =
     if (outliers == 1) " outlier" else " outliers"

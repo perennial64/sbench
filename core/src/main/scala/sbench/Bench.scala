@@ -10,6 +10,7 @@ object Bench {
       warmup: FiniteDuration = Defaults.warmup,
       samples: Int = Defaults.samples,
       batch: Batch = Defaults.batch,
+      work: Work = Defaults.work,
   )
 
   /** How many invocations are timed as one sample. */
@@ -28,8 +29,30 @@ object Bench {
     }
   }
 
+  /** How much logical work one invocation does.
+    *
+    * Declaring it lets a report derive throughput.
+    */
+  sealed trait Work
+
+  object Work {
+
+    /** One operation per invocation, so there is no throughput to report. */
+    case object One extends Work
+
+    /** `count` logical operations per invocation. */
+    final case class Ops(count: Long) extends Work {
+      require(count > 0, "work count must be positive")
+    }
+
+    /** `count` bytes processed per invocation. */
+    final case class Bytes(count: Long) extends Work {
+      require(count > 0, "work count must be positive")
+    }
+  }
+
   /** Result of a bench: one per-invocation timing for each sample taken. */
-  final case class Result(batch: Int, samplesNs: Vector[Double]) {
+  final case class Result(batch: Int, samplesNs: Vector[Double], work: Work = Work.One) {
     require(samplesNs.nonEmpty, "a result needs at least one sample")
 
     private lazy val sorted: Vector[Double] = samplesNs.sorted
@@ -74,7 +97,21 @@ object Bench {
       samplesNs.count(s => s < q1 - fence || s > q3 + fence)
     }
 
-    def opsPerSecond: Double = if (meanNs == 0.0) 0.0 else 1e9 / meanNs
+    /** Invocations per second, whatever work each one does. */
+    def invocationsPerSecond: Double = if (meanNs == 0.0) 0.0 else 1e9 / meanNs
+
+    /** Work units per second at a given per-invocation time, or `None` when no
+      * work was declared.
+      */
+    def throughputAt(ns: Double): Option[Double] = work match {
+      case Work.One => None
+      case _ if ns <= 0.0 => None
+      case Work.Ops(count) => Some(count * 1e9 / ns)
+      case Work.Bytes(count) => Some(count * 1e9 / ns)
+    }
+
+    /** Work units per second at the mean. */
+    def throughput: Option[Double] = throughputAt(meanNs)
   }
 
   /** Bench an input chain, whose `yield` body is the benchmark. */
@@ -99,7 +136,7 @@ object Bench {
         s += 1
       }
 
-      Result(batch, samples.result())
+      Result(batch, samples.result(), opts.work)
     } finally Input.releaseAll(trial.releases)
   }
 
@@ -170,6 +207,9 @@ object Bench {
 
     /** How many samples to keep. */
     val samples: Int = 10
+
+    /** Report no throughput unless a bench declares its work. */
+    val work: Work = Work.One
 
     /** Let the harness size batches by default. */
     val batch: Batch = Batch.Timed()
