@@ -1,7 +1,32 @@
 package sbench.examples
 
-import sbench.Report
+import scala.util.Try
 
-/** Entry point for every example suite. */
-@main def runExamples(): Unit =
-  Report.print(SumBench.run() ++ BatchBench.run() ++ LookupBench.run() ++ ChecksumBench.run())
+import sbench.Bench
+import sbench.Reporter
+import sbench.Suite
+
+@main def runExamples(): Unit = {
+  val suites: Vector[(String, Suite)] = Vector(
+    "Basics" -> Basics,
+    "Batching" -> Batching,
+    "State" -> State,
+    "Blackholes" -> Blackholes,
+    "Throughput" -> Throughput,
+    "Threads" -> Threads,
+    "Checks" -> Checks,
+  )
+
+  val reporter = new Reporter(suites.flatMap(_._2.names))
+  val measured = Vector.newBuilder[(String, Try[Bench.Result])]
+
+  for ((label, suite) <- suites) {
+    println(s"-- $label --")
+    for (result <- suite.collect()) {
+      println(reporter.line(result))
+      measured += result
+    }
+  }
+
+  println(reporter.summary(measured.result()))
+}
